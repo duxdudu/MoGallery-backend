@@ -152,7 +152,7 @@ class NotificationService {
       isViewed: notification.isViewed,
       viewOnce: true,
       createdAt: notification.createdAt,
-      actionUrl: `/dashboard/folders/${notification.folder._id}/media/${notification.media._id}?viewOnce=true&notificationId=${notification._id}`,
+      actionUrl: `/dashboard/media/${notification.media._id}?viewOnce=true&notificationId=${notification._id}`,
       isViewOnceNotification: true,
       mediaPreview: notification.mediaPreview,
       expiresAt: notification.expiresAt,

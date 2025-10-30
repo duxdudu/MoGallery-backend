@@ -748,23 +748,19 @@ router.post('/:id/share-direct', authenticateToken, async (req, res) => {
       return res.status(403).json({ message: 'You can only share your own media' });
     }
 
-    // Find or create users for the emails
+    // Find existing users for the emails; record failures for unknown emails
+    const results = [];
     const users = [];
-    for (const email of emails) {
-      let user = await User.findOne({ email: email.toLowerCase() });
+    for (const rawEmail of emails) {
+      const email = rawEmail.toLowerCase();
+      const user = await User.findOne({ email });
       if (!user) {
-        // Create user if they don't exist
-        user = new User({
-          email: email.toLowerCase(),
-          isVerified: false
-        });
-        await user.save();
-        console.log(`Created new user for email: ${email}`);
+        console.warn(`No user found for email: ${email}. Skipping.`);
+        results.push({ email, success: false, error: 'User not found' });
+        continue;
       }
       users.push(user);
     }
-
-    const results = [];
 
     for (const user of users) {
       try {

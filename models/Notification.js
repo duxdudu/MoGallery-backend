@@ -137,7 +137,7 @@ notificationSchema.statics.createMediaShareNotification = function(data) {
     viewOnce,
     scheduledFor,
     expiresAt,
-    actionUrl: `/dashboard/folders/${folderId}/media/${mediaId}`
+    actionUrl: `/dashboard/media/${mediaId}`
   });
 };
 
