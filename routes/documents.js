@@ -4,8 +4,24 @@ const { authenticateToken } = require('../middleware/auth');
 const { documentUpload } = require('../config/cloudinary');
 const path = require('path');
 const Document = require('../models/Document');
+const https = require('https');
+const pdf = require('pdf-parse');
+const mammoth = require('mammoth');
 
 const router = express.Router();
+
+const downloadFile = (url) => {
+  return new Promise((resolve, reject) => {
+    https.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        return reject(new Error(`Failed to get file from ${url}, status code: ${response.statusCode}`));
+      }
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', (err) => reject(err));
+  });
+};
 
 // List documents for current user with search/sort/filter
 router.get('/', authenticateToken, async (req, res) => {
@@ -144,7 +160,24 @@ router.post('/upload', authenticateToken, (req, res, next) => {
         console.error('Storage limit check failed, allowing upload by default:', limitErr);
       }
 
-      const doc = new Document({ owner: req.user.id, title, fileUrl, fileType, size: fileSize });
+      let content = '';
+      try {
+        const fileBuffer = await downloadFile(fileUrl);
+        if (fileType === 'application/pdf') {
+          const data = await pdf(fileBuffer);
+          content = data.text;
+        } else if (fileType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          const { value } = await mammoth.extractRawText({ buffer: fileBuffer });
+          content = value;
+        } else if (fileType === 'text/plain') {
+          content = fileBuffer.toString('utf8');
+        }
+      } catch (extractError) {
+        console.error('Text extraction failed:', extractError);
+        return res.status(400).json({ message: 'Failed to extract text from the document. The file may be corrupted or in an unsupported format.' });
+      }
+
+      const doc = new Document({ owner: req.user.id, title, fileUrl, fileType, size: fileSize, content });
       await doc.save();
     
       console.log('Document saved successfully:', doc._id);
