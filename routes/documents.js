@@ -167,14 +167,24 @@ router.post('/upload', authenticateToken, (req, res, next) => {
           const data = await pdf(fileBuffer);
           content = data.text;
         } else if (fileType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          // .docx files - extract text using mammoth
           const { value } = await mammoth.extractRawText({ buffer: fileBuffer });
           content = value;
+        } else if (fileType === 'application/msword') {
+          // .doc files now(old format) - mammoth doesn't support these
+          // For now, we'll save the file but leave content empty
+          // Users can still download and view the file
+          content = '[Content extraction not available for .doc files. Please use .docx format for text extraction.]';
+          console.warn('Text extraction not supported for .doc files. File uploaded but content not extracted.');
         } else if (fileType === 'text/plain') {
           content = fileBuffer.toString('utf8');
         }
       } catch (extractError) {
         console.error('Text extraction failed:', extractError);
-        return res.status(400).json({ message: 'Failed to extract text from the document. The file may be corrupted or in an unsupported format.' });
+        // Don't fail the upload if extraction fails - just save with empty content
+        // The file is still available for download
+        content = '[Content extraction failed. The file has been uploaded and is available for download.]';
+        console.warn('Continuing with upload despite extraction failure');
       }
 
       const doc = new Document({ owner: req.user.id, title, fileUrl, fileType, size: fileSize, content });
