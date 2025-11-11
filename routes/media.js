@@ -12,7 +12,8 @@ const Media = require('../models/Media');
 const Folder = require('../models/Folder');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
-const { upload, cloudinary } = require('../config/cloudinary');
+const { upload, encryptedMediaUpload, cloudinary } = require('../config/cloudinary');
+const multer = require('multer');
 
 // Validation middleware
 const validateHideUser = [
@@ -112,62 +113,114 @@ router.get('/all', authenticateToken, async (req, res) => {
   }
 });
 
+// Helper function to check if files are encrypted
+function hasEncryptionMetadata(req) {
+  // Check if any encryption metadata fields exist in the request
+  // Note: req.body is populated by multer for form fields
+  const bodyKeys = Object.keys(req.body || {});
+  return bodyKeys.some(key => key.startsWith('encryption_'));
+}
+
+// Helper to extract encryption metadata for a specific file
+function getEncryptionMetadataForFile(req, fileName) {
+  const bodyKeys = Object.keys(req.body || {});
+  // Try to find encryption metadata that matches this file
+  // The frontend sends it as "encryption_<originalFileName>"
+  for (const key of bodyKeys) {
+    if (key.startsWith('encryption_')) {
+      try {
+        const metadata = JSON.parse(req.body[key]);
+        // Check if this metadata matches the file
+        // The encrypted file might have "encrypted_" prefix
+        const cleanFileName = fileName.replace(/^encrypted_/, '');
+        if (metadata.originalName === cleanFileName || metadata.originalName === fileName) {
+          return metadata;
+        }
+      } catch (e) {
+        // Not valid JSON, skip
+      }
+    }
+  }
+  return null;
+}
+
 // Upload up to 10 media files to a folder using Cloudinary
 router.post('/upload/:folderId', 
   authenticateToken, 
   checkFolderUploadPermission,
+  // Use multer with memory storage to process both files and form fields
+  // This allows us to check req.body for encryption metadata and access file buffers
+  multer({ 
+    storage: multer.memoryStorage(),
+    limits: {
+      fileSize: 100 * 1024 * 1024, // 100MB limit
+    }
+  }).any(),
+  // Now check for encryption and use appropriate handler
   (req, res, next) => {
-    // Wrap multer to surface validation errors clearly
-    const handler = upload.array('media', 10);
-    handler(req, res, (err) => {
-      if (err) {
-        // Normalize multer/cloudinary errors so the frontend can display helpful messages
-        const isMulterError = err.name === 'MulterError';
-        let status = 400;
-        let code = err.code || err.name || 'UPLOAD_ERROR';
-        let message = err.message || 'Upload error';
+    // Check if encryption metadata exists
+    const isEncrypted = hasEncryptionMetadata(req);
+    
+    // If encrypted, we need to re-process with encrypted storage
+    // But multer already consumed the request stream...
+    // So we'll handle this in the route handler by checking req.body
+    // and using the appropriate Cloudinary storage
+    
+    // For now, store encryption flag and proceed
+    req._isEncrypted = isEncrypted;
+    req._encryptedFiles = isEncrypted ? (req.files || []).filter(f => f.fieldname === 'media') : [];
+    
+    next();
+  },
+  // Error handler for multer
+  (err, req, res, next) => {
+    if (err) {
+      const isMulterError = err.name === 'MulterError';
+      let status = 400;
+      let code = err.code || err.name || 'UPLOAD_ERROR';
+      let message = err.message || 'Upload error';
 
-        if (isMulterError) {
-          switch (err.code) {
-            case 'LIMIT_FILE_SIZE':
-              message = 'File too large. Max size is 100MB.';
-              break;
-            case 'LIMIT_FILE_COUNT':
-              message = 'Too many files. You can upload at most 10.';
-              break;
-            case 'LIMIT_UNEXPECTED_FILE':
-              message = 'Unexpected file field. Use "media".';
-              break;
-            default:
-              message = `Upload failed: ${message}`;
-          }
+      if (isMulterError) {
+        switch (err.code) {
+          case 'LIMIT_FILE_SIZE':
+            message = 'File too large. Max size is 100MB.';
+            break;
+          case 'LIMIT_FILE_COUNT':
+            message = 'Too many files. You can upload at most 10.';
+            break;
+          case 'LIMIT_UNEXPECTED_FILE':
+            message = 'Unexpected file field. Use "media".';
+            break;
+          default:
+            message = `Upload failed: ${message}`;
         }
-
-        // Some cloudinary/storage errors may come through as generic Error
-        if (!isMulterError && code && typeof code === 'string' && code.toLowerCase().includes('cloudinary')) {
-          // Validation/config issues from Cloudinary should be considered a bad request (400),
-          // but transient Cloudinary outages would be 5xx from their API. Since this is
-          // happening before the upload starts (storage params), treat as 400.
-          status = 400;
-        }
-
-        // Timeouts surface differently depending on layer; expose a clear message and 504
-        if (code && typeof code === 'string' && code.toLowerCase().includes('timeout')) {
-          status = 504;
-          message = message.includes('Timeout') ? message : 'Request Timeout while uploading to cloud storage';
-        }
-
-        return res.status(status).json({ message, code });
       }
-      next();
-    });
+
+      return res.status(status).json({ message, code });
+    }
+    next();
   },
   async (req, res) => {
     try {
-      const files = req.files || [];
+      // Filter only 'media' files (multer.any() processes all fields)
+      const files = (req.files || []).filter(f => f.fieldname === 'media');
       if (!files.length) {
         return res.status(400).json({ message: 'No files uploaded' });
       }
+      
+      // Debug logging
+      console.log('Upload request:', {
+        fileCount: files.length,
+        files: files.map(f => ({
+          name: f.originalname,
+          size: f.size,
+          mimetype: f.mimetype,
+          hasBuffer: !!f.buffer,
+          bufferLength: f.buffer?.length
+        })),
+        hasEncryptionMetadata: hasEncryptionMetadata(req),
+        bodyKeys: Object.keys(req.body || {})
+      });
 
       // Enforce per-user storage limit for the batch upload
       try {
@@ -186,16 +239,95 @@ router.post('/upload/:folderId',
       }
 
       const created = [];
-      for (const file of files) {
-        const fileType = file.mimetype.startsWith('image/') ? 'image' : 'video';
+      const isEncrypted = hasEncryptionMetadata(req);
+      const { uploadToCloudinary } = require('../config/cloudinary');
+      
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        
+        // Extract encryption metadata if present
+        let encryptionData = null;
+        if (isEncrypted) {
+          // Get encryption metadata for this specific file
+          encryptionData = getEncryptionMetadataForFile(req, file.originalname);
+          
+          // If not found by filename, try to match by index
+          // (frontend might send encryption_0, encryption_1, etc.)
+          if (!encryptionData) {
+            const encryptionKey = `encryption_${i}`;
+            if (req.body[encryptionKey]) {
+              try {
+                encryptionData = JSON.parse(req.body[encryptionKey]);
+              } catch (e) {
+                console.error('Failed to parse encryption metadata:', e);
+              }
+            }
+          }
+        }
+        
+        // Ensure we have a buffer
+        if (!file.buffer) {
+          console.error('File buffer not available for file:', file.originalname);
+          throw new Error('File buffer not available');
+        }
+        
+        // Upload to Cloudinary with appropriate storage
+        let cloudinaryResult;
+        try {
+          if (isEncrypted && encryptionData) {
+            // Upload as raw resource for encrypted files
+            cloudinaryResult = await uploadToCloudinary(file.buffer, {
+              folder: 'mogallery/encrypted',
+              resource_type: 'raw',
+              public_id: `enc_${Date.now()}_${file.originalname.replace(/[^a-zA-Z0-9]/g, '_')}`
+            });
+          } else {
+            // Upload as auto (image/video) for unencrypted files
+            const isImage = file.mimetype.startsWith('image/');
+            cloudinaryResult = await uploadToCloudinary(file.buffer, {
+              folder: 'mogallery',
+              resource_type: 'auto',
+              transformation: isImage ? [
+                { width: 1920, height: 1080, crop: 'limit' },
+                { quality: 'auto' },
+                { fetch_format: 'auto' }
+              ] : [
+                { width: 1280, height: 720, crop: 'limit' },
+                { quality: 'auto' },
+                { fetch_format: 'auto' },
+                { video_codec: 'auto' }
+              ]
+            });
+          }
+        } catch (uploadError) {
+          console.error('Cloudinary upload error for file:', file.originalname, uploadError);
+          throw new Error(`Failed to upload file to cloud storage: ${uploadError.message || 'Unknown error'}`);
+        }
+        
+        // Determine file type - use original type from encryption metadata if available
+        const originalMimeType = encryptionData?.originalType || file.mimetype;
+        const fileType = originalMimeType.startsWith('image/') ? 'image' : 'video';
+        
+        // Use original filename from encryption metadata if available
+        const fileName = encryptionData?.originalName || file.originalname.replace(/^encrypted_/, '');
+        
         const media = new Media({
-          fileName: file.originalname,
-          filePath: file.path,
-          cloudinaryId: file.filename,
+          fileName: fileName,
+          filePath: cloudinaryResult.secure_url,
+          cloudinaryId: cloudinaryResult.public_id,
           size: file.size || 0,
           fileType,
           owner: req.user.id,
-          folder: req.params.folderId
+          folder: req.params.folderId,
+          encryption: encryptionData ? {
+            encrypted: true,
+            iv: encryptionData.iv,
+            originalName: encryptionData.originalName,
+            originalType: encryptionData.originalType,
+            keyId: encryptionData.keyId || 'masterKey'
+          } : {
+            encrypted: false
+          }
         });
         await media.save();
         created.push(media);
@@ -542,7 +674,21 @@ router.get('/:id/view',
         await media.markAsViewed(req.user.id);
       }
 
-      // Redirect to Cloudinary URL
+      // If encrypted, return metadata along with file URL for client-side decryption
+      if (media.encryption?.encrypted) {
+        return res.json({
+          encrypted: true,
+          fileUrl: media.filePath,
+          encryption: {
+            iv: media.encryption.iv,
+            originalName: media.encryption.originalName,
+            originalType: media.encryption.originalType,
+            keyId: media.encryption.keyId
+          }
+        });
+      }
+
+      // Redirect to Cloudinary URL for unencrypted files
       res.redirect(media.filePath);
     } catch (error) {
       res.status(500).json({ 
@@ -569,7 +715,21 @@ router.get('/:id/download',
         await media.markAsViewed(req.user.id);
       }
 
-      // Redirect to Cloudinary URL for download
+      // If encrypted, return metadata along with file URL for client-side decryption
+      if (media.encryption?.encrypted) {
+        return res.json({
+          encrypted: true,
+          fileUrl: media.filePath,
+          encryption: {
+            iv: media.encryption.iv,
+            originalName: media.encryption.originalName,
+            originalType: media.encryption.originalType,
+            keyId: media.encryption.keyId
+          }
+        });
+      }
+
+      // Redirect to Cloudinary URL for download (unencrypted files)
       res.redirect(media.filePath);
     } catch (error) {
       res.status(500).json({ 
@@ -717,6 +877,33 @@ router.get('/:id/download-url',
       if (media.viewOnce?.enabled) {
         await media.markAsViewed(req.user.id);
       }
+      
+      // If encrypted, return metadata along with file URL for client-side decryption
+      if (media.encryption?.encrypted) {
+        let url = media.filePath;
+        try {
+          if (typeof url === 'string' && url.includes('/upload/')) {
+            // Insert fl_attachment/ after /upload/
+            url = url.replace('/upload/', '/upload/fl_attachment/');
+          } else if (typeof url === 'string' && url.startsWith('http')) {
+            // Append download hint as fallback
+            const sep = url.includes('?') ? '&' : '?';
+            url = `${url}${sep}download=1`;
+          }
+        } catch (_) {}
+        
+        return res.json({ 
+          url,
+          encrypted: true,
+          encryption: {
+            iv: media.encryption.iv,
+            originalName: media.encryption.originalName,
+            originalType: media.encryption.originalType,
+            keyId: media.encryption.keyId
+          }
+        });
+      }
+      
       // For Cloudinary assets, use fl_attachment to force download
       let url = media.filePath;
       try {
@@ -730,7 +917,7 @@ router.get('/:id/download-url',
         }
       } catch (_) {}
 
-      res.json({ url });
+      res.json({ url, encrypted: false });
     } catch (error) {
       res.status(500).json({ 
         message: 'Failed to get download URL',
@@ -1274,6 +1461,33 @@ router.get('/:id/download-url',
       if (media.viewOnce?.enabled) {
         await media.markAsViewed(req.user.id);
       }
+      
+      // If encrypted, return metadata along with file URL for client-side decryption
+      if (media.encryption?.encrypted) {
+        let url = media.filePath;
+        try {
+          if (typeof url === 'string' && url.includes('/upload/')) {
+            // Insert fl_attachment/ after /upload/
+            url = url.replace('/upload/', '/upload/fl_attachment/');
+          } else if (typeof url === 'string' && url.startsWith('http')) {
+            // Append download hint as fallback
+            const sep = url.includes('?') ? '&' : '?';
+            url = `${url}${sep}download=1`;
+          }
+        } catch (_) {}
+        
+        return res.json({ 
+          url,
+          encrypted: true,
+          encryption: {
+            iv: media.encryption.iv,
+            originalName: media.encryption.originalName,
+            originalType: media.encryption.originalType,
+            keyId: media.encryption.keyId
+          }
+        });
+      }
+      
       // For Cloudinary assets, use fl_attachment to force download
       let url = media.filePath;
       try {
@@ -1287,7 +1501,7 @@ router.get('/:id/download-url',
         }
       } catch (_) {}
 
-      res.json({ url });
+      res.json({ url, encrypted: false });
     } catch (error) {
       res.status(500).json({ 
         message: 'Failed to get download URL',

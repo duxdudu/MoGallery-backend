@@ -64,6 +64,13 @@ mongoose.connect(process.env.MONGO_URI, {
   } catch (e) {
     console.warn('Socket handlers not started:', e.message || e);
   }
+  // Start social media sync job
+  try {
+    const { startPeriodicSync } = require('./services/socialMediaSyncJob');
+    startPeriodicSync(60); // Sync every 60 minutes
+  } catch (e) {
+    console.warn('Social media sync job not started:', e.message || e);
+  }
 })
 .catch((err) => console.error('MongoDB connection error:', err));
 
@@ -76,6 +83,7 @@ app.use('/api/notifications', require('./routes/notifications')); // Added for n
 app.use('/api/professional-notifications', require('./routes/professionalNotifications')); // Added for professional notifications
 app.use('/api/analytics', require('./routes/analytics')); // Added for analytics
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/social-media', require('./routes/socialMedia')); // Added for social media integration
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

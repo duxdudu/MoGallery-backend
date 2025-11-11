@@ -78,6 +78,25 @@ const upload = multer({
   },
 });
 
+// Create a separate upload configuration for encrypted media files
+// Encrypted files must be stored as 'raw' because Cloudinary cannot process encrypted binary data
+const encryptedMediaStorage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: async (req, file) => {
+    console.log('Cloudinary upload params for encrypted media:', {
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size
+    });
+    
+    return {
+      folder: 'mogallery/encrypted',
+      resource_type: 'raw', // Use 'raw' for encrypted files
+      public_id: `enc_${Date.now()}_${file.originalname.replace(/[^a-zA-Z0-9]/g, '_')}`,
+    };
+  }
+});
+
 // Create a separate upload configuration for documents
 const documentStorage = new CloudinaryStorage({
   cloudinary: cloudinary,
@@ -127,10 +146,78 @@ const documentUpload = multer({
   },
 });
 
+// Helper function to upload buffer to Cloudinary
+async function uploadToCloudinary(buffer, options = {}) {
+  return new Promise((resolve, reject) => {
+    // For raw resources, use minimal options
+    const uploadOptions = {
+      resource_type: options.resource_type || 'auto',
+      folder: options.folder || 'mogallery',
+    };
+    
+    // Add public_id if provided
+    if (options.public_id) {
+      uploadOptions.public_id = options.public_id;
+    }
+    
+    // Only add transformation if not raw resource
+    if (options.resource_type !== 'raw' && options.transformation) {
+      uploadOptions.transformation = options.transformation;
+    }
+    
+    // For raw resources, explicitly disable format detection
+    if (options.resource_type === 'raw') {
+      // Don't add any format-specific options
+      // Cloudinary should accept any binary data as raw
+    } else {
+      // For auto/image/video, include all options
+      Object.keys(options).forEach(key => {
+        if (key !== 'resource_type' && key !== 'folder' && key !== 'public_id' && key !== 'transformation') {
+          uploadOptions[key] = options[key];
+        }
+      });
+    }
+
+    // Ensure buffer is a Buffer
+    const bufferToUpload = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    
+    cloudinary.uploader.upload_stream(uploadOptions, (error, result) => {
+      if (error) {
+        console.error('Cloudinary upload error:', {
+          message: error.message,
+          http_code: error.http_code,
+          name: error.name,
+          options: uploadOptions,
+          bufferLength: bufferToUpload.length
+        });
+        reject(error);
+      } else {
+        resolve(result);
+      }
+    }).end(bufferToUpload);
+  });
+}
+
+// Multer configuration for encrypted media
+const encryptedMediaUpload = multer({
+  storage: encryptedMediaStorage,
+  fileFilter: (req, file, cb) => {
+    // Accept any file type for encrypted files since they're stored as raw
+    // The original type is preserved in encryption metadata
+    cb(null, true);
+  },
+  limits: {
+    fileSize: 100 * 1024 * 1024, // 100MB limit
+  },
+});
+
 module.exports = {
   cloudinary,
   storage,
   upload,
+  encryptedMediaStorage,
+  encryptedMediaUpload,
   documentStorage,
   documentUpload,
+  uploadToCloudinary,
 };

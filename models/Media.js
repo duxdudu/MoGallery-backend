@@ -54,6 +54,34 @@ const mediaSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }],
+  // Metadata for social media posts
+  metadata: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
+  // Encryption metadata for end-to-end encrypted files
+  encryption: {
+    encrypted: {
+      type: Boolean,
+      default: false
+    },
+    iv: {
+      type: String, // Base64 encoded IV
+      required: function() { return this.encryption?.encrypted; }
+    },
+    originalName: {
+      type: String,
+      required: function() { return this.encryption?.encrypted; }
+    },
+    originalType: {
+      type: String, // Original MIME type
+      required: function() { return this.encryption?.encrypted; }
+    },
+    keyId: {
+      type: String,
+      default: 'masterKey'
+    }
+  },
   createdAt: {
     type: Date,
     default: Date.now
