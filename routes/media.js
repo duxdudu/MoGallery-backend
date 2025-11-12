@@ -122,10 +122,26 @@ function hasEncryptionMetadata(req) {
 }
 
 // Helper to extract encryption metadata for a specific file
-function getEncryptionMetadataForFile(req, fileName) {
+function getEncryptionMetadataForFile(req, fileName, fileIndex = null) {
   const bodyKeys = Object.keys(req.body || {});
   // Try to find encryption metadata that matches this file
-  // The frontend sends it as "encryption_<originalFileName>"
+  // The frontend sends it as "encryption_<index>" for parallel uploads
+  // or "encryption_<originalFileName>" for single uploads
+  
+  // First, try index-based matching if fileIndex is provided
+  if (fileIndex !== null) {
+    const indexKey = `encryption_${fileIndex}`;
+    if (req.body[indexKey]) {
+      try {
+        const metadata = JSON.parse(req.body[indexKey]);
+        return metadata;
+      } catch (e) {
+        console.error('Failed to parse encryption metadata:', e);
+      }
+    }
+  }
+  
+  // Fallback: try to find by filename matching
   for (const key of bodyKeys) {
     if (key.startsWith('encryption_')) {
       try {
@@ -208,6 +224,67 @@ router.post('/upload/:folderId',
         return res.status(400).json({ message: 'No files uploaded' });
       }
       
+      // Check for encryption metadata and validate MIME types
+      const isEncrypted = hasEncryptionMetadata(req);
+      
+      // Validate file types - be more lenient if encryption metadata exists
+      const allowedImageTypes = [
+        'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
+        'image/heic', 'image/heif'
+      ];
+      const allowedVideoTypes = [
+        'video/mp4', 'video/mov', 'video/avi', 'video/wmv', 'video/flv', 'video/webm',
+        'video/quicktime', 'video/3gpp', 'video/3gpp2', 'video/x-matroska', 'video/ogg'
+      ];
+      
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const fileMimeType = file.mimetype || '';
+        
+        // Get encryption metadata for this specific file (by index for parallel uploads)
+        const encryptionMetadata = isEncrypted ? getEncryptionMetadataForFile(req, file.originalname, i) : null;
+        const originalMimeType = encryptionMetadata?.originalType || fileMimeType;
+        
+        // If encrypted, check original type from metadata; otherwise check file MIME type
+        const isValidType = allowedImageTypes.includes(originalMimeType) || 
+                           allowedVideoTypes.includes(originalMimeType) ||
+                           (isEncrypted && encryptionMetadata && (originalMimeType.startsWith('image/') || originalMimeType.startsWith('video/')));
+        
+        if (!isValidType) {
+          // If encrypted but no valid type found, try to detect from filename
+          if (isEncrypted && encryptionMetadata) {
+            // Use original name from metadata to detect type
+            const ext = encryptionMetadata.originalName?.split('.').pop()?.toLowerCase();
+            const extToMime = {
+              'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'gif': 'image/gif',
+              'webp': 'image/webp', 'heic': 'image/heic', 'heif': 'image/heif',
+              'mp4': 'video/mp4', 'mov': 'video/quicktime', 'avi': 'video/avi', 'wmv': 'video/wmv',
+              'flv': 'video/flv', 'webm': 'video/webm', 'mkv': 'video/x-matroska', 'ogg': 'video/ogg'
+            };
+            const detectedType = ext ? extToMime[ext] : null;
+            if (detectedType && (allowedImageTypes.includes(detectedType) || allowedVideoTypes.includes(detectedType))) {
+              // Valid type detected from extension, continue
+              continue;
+            }
+          }
+          
+          // Reject if type is invalid
+          if (!fileMimeType || fileMimeType === 'application/octet-stream') {
+            return res.status(400).json({ 
+              message: `An unknown file format not allowed for file "${file.originalname}". Please ensure the file is an image or video.`,
+              code: 'Error'
+            });
+          }
+          
+          if (!allowedImageTypes.includes(fileMimeType) && !allowedVideoTypes.includes(fileMimeType)) {
+            return res.status(400).json({ 
+              message: `File type ${fileMimeType} is not allowed for file "${file.originalname}". Only images and videos are supported.`,
+              code: 'Error'
+            });
+          }
+        }
+      }
+      
       // Debug logging
       console.log('Upload request:', {
         fileCount: files.length,
@@ -218,7 +295,7 @@ router.post('/upload/:folderId',
           hasBuffer: !!f.buffer,
           bufferLength: f.buffer?.length
         })),
-        hasEncryptionMetadata: hasEncryptionMetadata(req),
+        hasEncryptionMetadata: isEncrypted,
         bodyKeys: Object.keys(req.body || {})
       });
 
@@ -239,7 +316,6 @@ router.post('/upload/:folderId',
       }
 
       const created = [];
-      const isEncrypted = hasEncryptionMetadata(req);
       const { uploadToCloudinary } = require('../config/cloudinary');
       
       for (let i = 0; i < files.length; i++) {
@@ -248,21 +324,8 @@ router.post('/upload/:folderId',
         // Extract encryption metadata if present
         let encryptionData = null;
         if (isEncrypted) {
-          // Get encryption metadata for this specific file
-          encryptionData = getEncryptionMetadataForFile(req, file.originalname);
-          
-          // If not found by filename, try to match by index
-          // (frontend might send encryption_0, encryption_1, etc.)
-          if (!encryptionData) {
-            const encryptionKey = `encryption_${i}`;
-            if (req.body[encryptionKey]) {
-              try {
-                encryptionData = JSON.parse(req.body[encryptionKey]);
-              } catch (e) {
-                console.error('Failed to parse encryption metadata:', e);
-              }
-            }
-          }
+          // Get encryption metadata for this specific file (try index first, then filename)
+          encryptionData = getEncryptionMetadataForFile(req, file.originalname, i);
         }
         
         // Ensure we have a buffer
