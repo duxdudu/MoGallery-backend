@@ -304,7 +304,9 @@ router.post('/upload/:folderId',
         const { wouldExceedLimit } = require('../utils/storage');
         const User = require('../models/User');
         const user = await User.findById(req.user.id).select('storageLimitMB');
-        const userLimitMB = user && user.storageLimitMB != null ? user.storageLimitMB : (process.env.DEFAULT_STORAGE_LIMIT_MB ? Number(process.env.DEFAULT_STORAGE_LIMIT_MB) : null);
+        const userLimitMB = user && user.storageLimitMB != null
+          ? user.storageLimitMB
+          : (process.env.DEFAULT_STORAGE_LIMIT_MB ? Number(process.env.DEFAULT_STORAGE_LIMIT_MB) : 2048);
         const totalNewBytes = files.reduce((sum, f) => sum + (f.size || 0), 0);
         const check = await wouldExceedLimit(req.user.id, totalNewBytes, userLimitMB);
         if (!check.allowed) {

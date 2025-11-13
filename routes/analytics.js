@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Media = require('../models/Media');
 const Folder = require('../models/Folder');
 const Notification = require('../models/Notification');
+const DeviceUsage = require('../models/DeviceUsage');
 const fs = require('fs');
 const path = require('path');
 const mongoose = require('mongoose');
@@ -75,7 +76,7 @@ router.get('/dashboard-stats', auth.authenticateToken, async (req, res) => {
     const userDoc = await User.findById(userId).select('storageLimitMB createdAt');
     const storageLimitMB = (userDoc && userDoc.storageLimitMB != null)
       ? Number(userDoc.storageLimitMB)
-      : (process.env.DEFAULT_STORAGE_LIMIT_MB ? Number(process.env.DEFAULT_STORAGE_LIMIT_MB) : null);
+      : (process.env.DEFAULT_STORAGE_LIMIT_MB ? Number(process.env.DEFAULT_STORAGE_LIMIT_MB) : 2048);
 
     // Compute remaining MB and percent used (if limit exists)
     const storageRemainingMB = storageLimitMB != null ? Math.max(0, +(storageLimitMB - storageUsedMB).toFixed(2)) : null;
@@ -376,15 +377,69 @@ router.get('/weekly-activity', auth.authenticateToken, async (req, res) => {
   }
 });
 
-// Get device usage (mock data - you can implement device tracking)
+// Track device usage
+router.post('/track-device', auth.authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { deviceType } = req.body;
+
+    if (!deviceType || !['Mobile', 'Desktop', 'Tablet'].includes(deviceType)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid device type. Must be Mobile, Desktop, or Tablet' 
+      });
+    }
+
+    // Create device usage record
+    const deviceUsage = new DeviceUsage({
+      userId,
+      deviceType,
+      userAgent: req.headers['user-agent'] || ''
+    });
+
+    await deviceUsage.save();
+
+    res.json({
+      success: true,
+      message: 'Device usage tracked successfully'
+    });
+  } catch (error) {
+    console.error('Error tracking device usage:', error);
+    res.status(500).json({ success: false, message: 'Failed to track device usage' });
+  }
+});
+
+// Get device usage statistics (aggregated from all users)
 router.get('/device-usage', auth.authenticateToken, async (req, res) => {
   try {
-    // Mock device usage data
-    const deviceData = [
-      { device: 'Mobile', percentage: 65 },
-      { device: 'Desktop', percentage: 30 },
-      { device: 'Tablet', percentage: 5 }
-    ];
+    // Aggregate device usage data from all users
+    const deviceStats = await DeviceUsage.aggregate([
+      {
+        $group: {
+          _id: '$deviceType',
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $project: {
+          device: '$_id',
+          count: 1,
+          _id: 0
+        }
+      },
+      {
+        $sort: { count: -1 }
+      }
+    ]);
+
+    // Ensure all device types are represented (even if count is 0)
+    const deviceTypes = ['Mobile', 'Desktop', 'Tablet'];
+    const deviceMap = new Map(deviceStats.map(d => [d.device, d.count]));
+    
+    const deviceData = deviceTypes.map(device => ({
+      device,
+      count: deviceMap.get(device) || 0
+    }));
 
     res.json({
       success: true,
