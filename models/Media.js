@@ -59,6 +59,20 @@ const mediaSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.Mixed,
     default: {}
   },
+  // Optional fields for social media integration
+  platform: {
+    type: String,
+    enum: ['instagram', 'facebook', 'facebook_page', 'tiktok', 'twitter', null],
+    default: null
+  },
+  platformPostId: {
+    type: String,
+    default: null
+  },
+  syncedAutomatically: {
+    type: Boolean,
+    default: false
+  },
   // Encryption metadata for end-to-end encrypted files
   encryption: {
     encrypted: {
@@ -92,6 +106,8 @@ const mediaSchema = new mongoose.Schema({
 mediaSchema.index({ folder: 1, owner: 1 });
 mediaSchema.index({ 'viewOnce.enabled': 1, 'viewOnce.sharedWith.user': 1 });
 mediaSchema.index({ 'isHiddenFor': 1 });
+mediaSchema.index({ platform: 1, platformPostId: 1 });
+mediaSchema.index({ syncedAutomatically: 1 });
 
 // Normalize legacy documents where viewOnce was stored as a boolean
 mediaSchema.post('init', function(doc) {

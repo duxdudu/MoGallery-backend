@@ -8,7 +8,7 @@ const socialMediaConnectionSchema = new mongoose.Schema({
   },
   platform: {
     type: String,
-    enum: ['instagram', 'facebook'],
+    enum: ['instagram', 'facebook', 'facebook_page', 'tiktok', 'twitter'],
     required: true
   },
   // OAuth tokens

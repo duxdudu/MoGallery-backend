@@ -396,6 +396,36 @@ router.post('/upload/:folderId',
         });
         await media.save();
         created.push(media);
+        
+        // Auto-upload to social media if requested
+        let autoUploadPlatforms = req.body.autoUploadPlatforms;
+        // Parse if it's a JSON string (from FormData)
+        if (typeof autoUploadPlatforms === 'string') {
+          try {
+            autoUploadPlatforms = JSON.parse(autoUploadPlatforms);
+          } catch (e) {
+            console.error('Error parsing autoUploadPlatforms:', e);
+            autoUploadPlatforms = null;
+          }
+        }
+        const caption = req.body.caption || '';
+        
+        if (autoUploadPlatforms && Array.isArray(autoUploadPlatforms) && autoUploadPlatforms.length > 0) {
+          try {
+            const { postToSocialMedia } = require('../services/socialMediaService');
+            // Post asynchronously to avoid blocking the response
+            setImmediate(async () => {
+              try {
+                await postToSocialMedia(media, autoUploadPlatforms, caption);
+              } catch (error) {
+                console.error('Error auto-uploading to social media:', error);
+              }
+            });
+          } catch (error) {
+            console.error('Error setting up auto-upload:', error);
+            // Don't fail the upload if auto-upload fails
+          }
+        }
       }
 
       // Populate minimal owner and folder fields for response consistency
